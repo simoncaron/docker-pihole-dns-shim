@@ -1,11 +1,20 @@
-import docker, time, requests, json, socket, os, sys, logging
+import docker
+import json
+import logging
+import os
+import requests
+import socket
+import sys
+import time
 
-docker_socket_url = os.getenv('DOCKER_HOST', "unix://var/run/docker.sock")
-token = os.getenv('PIHOLE_TOKEN', "")
-piholeAPI = os.getenv('PIHOLE_API', "http://pi.hole:8080/admin/api.php")
-statePath = os.getenv('STATE_FILE', "/state/pihole.state")
+dockerSocketUrl = os.getenv('DOCKER_HOST', "unix://var/run/docker.sock")
+defaultDnsRecordTarget = os.getenv('DEFAULT_DNS_RECORD_TARGET', '')
+piholeApiToken = os.getenv('PIHOLE_API_TOKEN', "")
+piholeApiUrl = os.getenv('PIHOLE_API_URL', "http://pi.hole:8080/admin/api.php")
+stateFilePath = os.getenv('STATE_FILE', "/state/pihole.state")
+syncInterval = os.getenv('SYNC_INTERVAL_SEC', 30)
 
-client = docker.DockerClient(base_url=docker_socket_url)
+client = docker.DockerClient(base_url=dockerSocketUrl)
 
 loggingLevel = logging.getLevelName(os.getenv('LOGGING_LEVEL', "INFO"))
 logging.basicConfig(
@@ -18,6 +27,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 global globalList
+globalList = set()
 
 
 def ipTest(ip):
@@ -35,16 +45,15 @@ def ipTest(ip):
 
 def flushList():
     jsonObject = json.dumps(list(globalList), indent=2)
-    with open(statePath, "w") as outfile:
+    with open(stateFilePath, "w") as outfile:
         outfile.write(jsonObject)
 
 
 def readState():
-    globalList = set()
-    fileExists = os.path.exists(statePath)
+    fileExists = os.path.exists(stateFilePath)
     if fileExists:
         logger.info("Loading existing state...")
-        with open(statePath, 'r') as openfile:
+        with open(stateFilePath, 'r') as openfile:
             readList = json.load(openfile)
             for obj in readList:
                 logger.info("From file (%s): %s" % (type(obj), obj))
@@ -64,7 +73,7 @@ def printState():
 
 def apiCall(endpoint, action, domain=None, target=None):
     if action == "get":
-        r = requests.get("%s?auth=%s&%s&action=%s" % (piholeAPI, token, endpoint, action))
+        r = requests.get("%s?auth=%s&%s&action=%s" % (piholeApiUrl, piholeApiToken, endpoint, action))
         if r.json()["data"]:
             success = True
         else:
@@ -75,7 +84,7 @@ def apiCall(endpoint, action, domain=None, target=None):
         elif endpoint == "customcname":
             paramName = "target"
         r = requests.get(
-            "%s?auth=%s&%s&action=%s&domain=%s&%s=%s" % (piholeAPI, token, endpoint, action, domain, paramName, target))
+            "%s?auth=%s&%s&action=%s&domain=%s&%s=%s" % (piholeApiUrl, piholeApiToken, endpoint, action, domain, paramName, target))
         if r.json()["success"]:
             success = True
         else:
@@ -89,11 +98,11 @@ def listExisting():
 
     dnsSuccess, dnsResult = apiCall("customdns", "get")
     dns = set([tuple(x) for x in dnsResult["data"]])
-    logger.debug("DNS Records: %s" % (dns))
+    logger.debug("DNS Records: %s" % dns)
 
     cnameSuccess, cnameResult = apiCall("customcname", "get")
     cname = set([tuple(x) for x in cnameResult["data"]])
-    logger.debug("CName Records: %s" % (cname))
+    logger.debug("CName Records: %s" % cname)
 
     logger.debug("done")
     return {"dns": dns, "cname": cname}
@@ -171,17 +180,17 @@ def handleList(newGlobalList, existingrecords):
     toSync = set([x for x in globalList if ((x not in existingrecords["dns"]) and (x not in existingrecords["cname"]))])
 
     if len(toAdd) > 0:
-        logger.debug("These are labels to add: %s" % (toAdd))
+        logger.debug("These are labels to add: %s" % toAdd)
         for add in toAdd:
             addObject(add, existingrecords)
 
     if len(toRemove) > 0:
-        logger.debug("These are labels to remove: %s" % (toRemove))
+        logger.debug("These are labels to remove: %s" % toRemove)
         for remove in toRemove:
             removeObject(remove, existingrecords)
 
     if len(toSync) > 0:
-        logger.debug("These are labels to sync: %s" % (toSync))
+        logger.debug("These are labels to sync: %s" % toSync)
         for sync in (toSync - toAdd - toRemove):
             addObject(sync, existingrecords)
 
@@ -190,7 +199,7 @@ def handleList(newGlobalList, existingrecords):
 
 
 if __name__ == "__main__":
-    if token == "":
+    if piholeApiToken == "":
         logger.warning("pihole token is blank, Set a token environment variable PIHOLE_TOKEN")
         sys.exit(1)
 
@@ -203,14 +212,21 @@ if __name__ == "__main__":
             globalListBefore = globalList.copy()
             newGlobalList = set()
             existingrecords = listExisting()
+
             for container in containers:
-                customRecordsLabel = container.labels.get("pihole.custom-record")
-                if customRecordsLabel:
-                    customRecords = json.loads(customRecordsLabel)
-                    for cr in customRecords:
-                        newGlobalList.add(tuple(cr))
+                host_ip = container.labels.get('pihole.dns.target.override', defaultDnsRecordTarget)
+                for key, value in container.labels.items():
+                    if ((key.startswith('traefik.http.routers.') or key.startswith('traefik.https.routers.'))
+                            and key.endswith('.rule')):
+                        host_directives = value.split('||')
+                        for directive in host_directives:
+                            if 'Host(' in directive:
+                                directive = directive.split('Host(')[-1].rstrip(')\'" ')
+                                domains = [domain.strip('` ,') for domain in directive.split(',') if domain.strip()]
+                                for domain in domains:
+                                    newGlobalList.add(tuple([domain, host_ip]))
 
             handleList(newGlobalList, existingrecords)
-            logger.info("Run sync")
+            logger.debug("Run sync")
 
-            time.sleep(10)
+            time.sleep(syncInterval)

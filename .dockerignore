@@ -1,6 +1,0 @@
-*
-
-# Allow specific files
-!/shim.py
-!/logging.conf
-!/README.md

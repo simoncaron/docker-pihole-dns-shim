@@ -1,16 +1,12 @@
-FROM alpine:latest
+FROM python:3.12.4-slim
 
-WORKDIR /app
+WORKDIR /usr/src/app
 
-RUN apk add --no-cache \
-  bash \
-  curl \
-  python3 \
-  py3-pip \
-  py3-docker-py \
-  py3-requests
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
 
-COPY . /app
+COPY shim.py ./
+
 RUN mkdir /state
 
-ENTRYPOINT ["python", "/app/shim.py"]
+CMD [ "python", "./shim.py" ]

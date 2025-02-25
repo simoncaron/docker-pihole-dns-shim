@@ -1,12 +1,12 @@
-FROM python:3.12.4-slim
+FROM python:3.12.8-slim
 
 WORKDIR /usr/src/app
 
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY shim.py ./
+COPY app.py ./
 
 RUN mkdir /state
 
-CMD [ "python", "./shim.py" ]
+CMD [ "python", "./app.py" ]
